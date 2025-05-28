@@ -1,9 +1,17 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { MapContainer, TileLayer, Marker, Polygon, Popup } from 'react-leaflet';
+import { MapContainer, TileLayer, Polygon, Marker, Popup, Circle } from 'react-leaflet';
 import { missionsAPI } from '../services/api';
 import { toast } from 'react-toastify';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+
+// Fix Leaflet default icons
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: require('leaflet/dist/images/marker-icon-2x.png'),
+  iconUrl: require('leaflet/dist/images/marker-icon.png'),
+  shadowUrl: require('leaflet/dist/images/marker-shadow.png'),
+});
 
 // Custom drone icon
 const createDroneIcon = () => {
@@ -39,20 +47,12 @@ const MissionMonitor = () => {
   const [missionDetails, setMissionDetails] = useState(null);
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState('all');
-  const [editingMission, setEditingMission] = useState(null);
-  const [editFormData, setEditFormData] = useState({
-    name: '',
-    description: '',
-    flight_altitude: 50,
-    flight_speed: 5.0,
-    overlap_percentage: 70
-  });
   const [realTimeData, setRealTimeData] = useState({
     battery: 85,
     gpsSignal: 'Strong',
     connectionStatus: 'online',
-    currentAction: 'Capturing Images',
-    satellites: 12,
+    currentAction: 'Scanning Area',
+    satellites: 11,
     currentPosition: null
   });
 
@@ -71,31 +71,167 @@ const MissionMonitor = () => {
     return actions[Math.floor(Math.random() * actions.length)];
   }, []);
 
-  // Enhanced real-time data simulation with drone position
+  // Helper function to check if mission should show drone position
+  const shouldShowDronePosition = (mission) => {
+    return mission && ['in_progress', 'paused'].includes(mission.status);
+  };
+
+  // Helper function to check if mission is inactive (completed/aborted)
+  const isInactiveMission = (mission) => {
+    return mission && ['completed', 'aborted', 'failed'].includes(mission.status);
+  };
+
+  // Dynamic helper function to detect coordinate format and get center
+  const getSurveyAreaCenter = (surveyArea) => {
+    if (!surveyArea || !surveyArea.coordinates || !surveyArea.coordinates[0]) {
+      return [12.9716, 77.5946]; // Default fallback
+    }
+
+    try {
+      const coords = surveyArea.coordinates[0];
+      
+      // Auto-detect coordinate format by checking value ranges
+      let lats, lngs;
+      
+      // Check if first coordinate looks like latitude (typically -90 to 90)
+      const firstCoord = coords[0];
+      if (Math.abs(firstCoord[0]) <= 90 && Math.abs(firstCoord[1]) > 90) {
+        // Format: [lat, lng]
+        lats = coords.map(coord => coord[0]);
+        lngs = coords.map(coord => coord[1]);
+      } else if (Math.abs(firstCoord[1]) <= 90 && Math.abs(firstCoord[0]) > 90) {
+        // Format: [lng, lat] (GeoJSON standard)
+        lats = coords.map(coord => coord[1]);
+        lngs = coords.map(coord => coord[0]);
+      } else {
+        // Fallback: assume [lat, lng] if both are in valid ranges
+        lats = coords.map(coord => coord[0]);
+        lngs = coords.map(coord => coord[1]);
+      }
+      
+      const centerLat = (Math.min(...lats) + Math.max(...lats)) / 2;
+      const centerLng = (Math.min(...lngs) + Math.max(...lngs)) / 2;
+      
+      return [centerLat, centerLng];
+    } catch (error) {
+      console.error('Error calculating survey area center:', error);
+      return [12.9716, 77.5946]; // Fallback
+    }
+  };
+
+  // Dynamic survey area polygon conversion
+  const getSurveyAreaPolygon = (surveyArea) => {
+    if (!surveyArea || !surveyArea.coordinates || !Array.isArray(surveyArea.coordinates)) {
+      return null;
+    }
+
+    try {
+      let coordinates;
+      
+      // Handle different GeoJSON structures
+      if (surveyArea.type === 'Polygon' && surveyArea.coordinates.length > 0) {
+        coordinates = surveyArea.coordinates[0];
+      } else if (Array.isArray(surveyArea.coordinates[0]) && Array.isArray(surveyArea.coordinates[0][0])) {
+        coordinates = surveyArea.coordinates[0];
+      } else {
+        coordinates = surveyArea.coordinates;
+      }
+
+      // Auto-detect coordinate format and convert to [lat, lng] for Leaflet
+      const leafletCoords = coordinates.map(coord => {
+        if (Array.isArray(coord) && coord.length >= 2) {
+          // Auto-detect format by checking value ranges
+          if (Math.abs(coord[0]) <= 90 && Math.abs(coord[1]) > 90) {
+            // Format: [lat, lng] - use as is
+            return [coord[0], coord[1]];
+          } else if (Math.abs(coord[1]) <= 90 && Math.abs(coord[0]) > 90) {
+            // Format: [lng, lat] - swap to [lat, lng]
+            return [coord[1], coord[0]];
+          } else {
+            // Both values in lat range or ambiguous - assume [lat, lng]
+            return [coord[0], coord[1]];
+          }
+        }
+        return coord;
+      });
+
+      return leafletCoords;
+    } catch (error) {
+      console.error('Error converting survey area:', error);
+      return null;
+    }
+  };
+
+  // Dynamic random position generation within any survey area (only for active missions)
+  const generateRandomPositionInBounds = (coords) => {
+    try {
+      let lats, lngs;
+      
+      // Auto-detect coordinate format
+      const firstCoord = coords[0];
+      if (Math.abs(firstCoord[0]) <= 90 && Math.abs(firstCoord[1]) > 90) {
+        // Format: [lat, lng]
+        lats = coords.map(coord => coord[0]);
+        lngs = coords.map(coord => coord[1]);
+      } else if (Math.abs(firstCoord[1]) <= 90 && Math.abs(firstCoord[0]) > 90) {
+        // Format: [lng, lat]
+        lats = coords.map(coord => coord[1]);
+        lngs = coords.map(coord => coord[0]);
+      } else {
+        // Fallback: assume [lat, lng]
+        lats = coords.map(coord => coord[0]);
+        lngs = coords.map(coord => coord[1]);
+      }
+      
+      const minLat = Math.min(...lats);
+      const maxLat = Math.max(...lats);
+      const minLng = Math.min(...lngs);
+      const maxLng = Math.max(...lngs);
+      
+      // Generate random position within bounds with bias towards center
+      const latRange = maxLat - minLat;
+      const lngRange = maxLng - minLng;
+      
+      // Use controlled random factors to keep drone movement realistic
+      const randomLatFactor = 0.2 + (Math.random() * 0.6); // 0.2 to 0.8 range
+      const randomLngFactor = 0.2 + (Math.random() * 0.6); // 0.2 to 0.8 range
+      
+      const randomLat = minLat + (randomLatFactor * latRange);
+      const randomLng = minLng + (randomLngFactor * lngRange);
+      
+      return [randomLat, randomLng];
+    } catch (error) {
+      console.error('Error generating random position:', error);
+      return [12.9716, 77.5946]; // Fallback
+    }
+  };
+
+  // Enhanced real-time data simulation - only for active missions
   const simulateRealTimeData = useCallback(() => {
     setRealTimeData(prev => {
       let newPosition = prev.currentPosition;
       
-      // Simulate drone movement within survey area if mission is active
-      if (selectedMission && selectedMission.status === 'in_progress' && missionDetails?.survey_area) {
-        const surveyCoords = missionDetails.survey_area.coordinates[0];
-        const minLat = Math.min(...surveyCoords.map(coord => coord[1]));
-        const maxLat = Math.max(...surveyCoords.map(coord => coord[1]));
-        const minLng = Math.min(...surveyCoords.map(coord => coord[0]));
-        const maxLng = Math.max(...surveyCoords.map(coord => coord[0]));
+      // Only simulate movement for ACTIVE missions (in_progress, paused)
+      if (selectedMission && 
+          shouldShowDronePosition(selectedMission) && 
+          missionDetails?.survey_area) {
         
-        // Random position within survey area
-        const randomLat = minLat + Math.random() * (maxLat - minLat);
-        const randomLng = minLng + Math.random() * (maxLng - minLng);
-        newPosition = [randomLat, randomLng];
+        const surveyArea = missionDetails.survey_area;
+        if (surveyArea.coordinates && surveyArea.coordinates.length > 0) {
+          const coords = surveyArea.coordinates[0];
+          newPosition = generateRandomPositionInBounds(coords);
+        }
+      } else {
+        // For inactive missions, clear drone position
+        newPosition = null;
       }
       
       return {
         ...prev,
-        battery: Math.max(15, prev.battery - Math.random() * 1.5),
-        satellites: 10 + Math.floor(Math.random() * 5),
+        battery: Math.max(15, prev.battery - (Math.random() * 0.3)), // Realistic battery drain
+        satellites: 8 + Math.floor(Math.random() * 7), // 8-14 satellites
         currentAction: getRandomAction(),
-        connectionStatus: Math.random() > 0.95 ? 'reconnecting' : 'online',
+        connectionStatus: Math.random() > 0.97 ? 'reconnecting' : 'online',
         currentPosition: newPosition
       };
     });
@@ -104,9 +240,9 @@ const MissionMonitor = () => {
   const fetchActiveMissions = useCallback(async () => {
     try {
       const response = await missionsAPI.getMissions();
-      // Include all missions for comprehensive monitoring
+      // Support all mission statuses dynamically
       const monitorableMissions = response.data.filter(mission => 
-        ['planned', 'in_progress', 'paused', 'completed', 'aborted', 'failed'].includes(mission.status)
+        mission && mission.id && mission.status
       );
       setMissions(monitorableMissions);
     } catch (error) {
@@ -120,7 +256,6 @@ const MissionMonitor = () => {
       const response = await missionsAPI.getMission(missionId);
       const mission = response.data;
       
-      // Handle different mission states - no waypoint generation needed
       setMissionDetails(mission);
     } catch (error) {
       console.error('Failed to fetch mission details:', error);
@@ -142,50 +277,42 @@ const MissionMonitor = () => {
   useEffect(() => {
     fetchActiveMissions();
     
-    // Set up real-time updates
+    // Set up real-time updates only for active missions
     const interval = setInterval(() => {
       fetchActiveMissions();
-      if (selectedMission) {
-        fetchMissionDetails(selectedMission.id);
+      if (selectedMission && shouldShowDronePosition(selectedMission)) {
         simulateRealTimeData();
       }
     }, 5000);
 
     return () => clearInterval(interval);
-  }, [selectedMission, fetchActiveMissions, fetchMissionDetails, simulateRealTimeData]);
-
-  // Simulate automatic progress updates for active missions
-  useEffect(() => {
-    if (selectedMission && selectedMission.status === 'in_progress') {
-      const progressInterval = setInterval(() => {
-        const currentProgress = selectedMission.progress_percentage;
-        if (currentProgress < 100) {
-          const newProgress = Math.min(100, currentProgress + Math.random() * 3);
-          const newDistance = selectedMission.distance_covered + Math.random() * 150;
-          
-          updateMissionProgress(selectedMission.id, {
-            progress_percentage: newProgress,
-            distance_covered: newDistance
-          });
-        }
-      }, 12000);
-
-      return () => clearInterval(progressInterval);
-    }
-  }, [selectedMission, updateMissionProgress]);
+  }, [selectedMission, fetchActiveMissions, simulateRealTimeData]);
 
   const handleMissionSelect = useCallback((mission) => {
     setSelectedMission(mission);
     fetchMissionDetails(mission.id);
-    // Reset real-time data for new mission
-    setRealTimeData({
-      battery: 85,
-      gpsSignal: 'Strong',
-      connectionStatus: 'online',
-      currentAction: 'Capturing Images',
-      satellites: 12,
-      currentPosition: null
-    });
+    
+    // Reset real-time data based on mission status
+    if (shouldShowDronePosition(mission)) {
+      setRealTimeData({
+        battery: 85,
+        gpsSignal: 'Strong',
+        connectionStatus: 'online',
+        currentAction: 'Scanning Area',
+        satellites: 11,
+        currentPosition: null
+      });
+    } else {
+      // For inactive missions, clear telemetry data
+      setRealTimeData({
+        battery: 0,
+        gpsSignal: 'N/A',
+        connectionStatus: 'offline',
+        currentAction: 'Mission Completed',
+        satellites: 0,
+        currentPosition: null
+      });
+    }
   }, [fetchMissionDetails]);
 
   const handleMissionControl = async (action, missionId) => {
@@ -225,6 +352,7 @@ const MissionMonitor = () => {
     }
   };
 
+  // Dynamic status color mapping
   const getStatusColor = (status) => {
     const colors = {
       'planned': '#6c757d',
@@ -249,6 +377,33 @@ const MissionMonitor = () => {
     return colors[status] || '#667eea';
   };
 
+  // Get polygon style based on mission status
+  const getPolygonStyle = (status) => {
+    const baseStyle = {
+      color: getPolygonColor(status),
+      fillColor: getPolygonColor(status),
+      weight: 3,
+    };
+
+    if (['completed', 'aborted', 'failed'].includes(status)) {
+      // Inactive missions: reference style
+      return {
+        ...baseStyle,
+        fillOpacity: 0.15,
+        opacity: 0.7,
+        dashArray: status === 'completed' ? '5, 10, 5' : '10, 5', // Different dash patterns
+      };
+    } else {
+      // Active missions: normal style
+      return {
+        ...baseStyle,
+        fillOpacity: 0.3,
+        opacity: 1,
+      };
+    }
+  };
+
+  // Dynamic formatting functions
   const formatDuration = (minutes) => {
     if (!minutes) return 'N/A';
     const hours = Math.floor(minutes / 60);
@@ -281,59 +436,54 @@ const MissionMonitor = () => {
     return { text: 'Poor', color: '#dc3545' };
   };
 
-  // Filter missions based on status
+  // Dynamic mission filtering
   const filteredMissions = missions.filter(mission => {
     if (statusFilter === 'all') return true;
     if (statusFilter === 'active') return ['in_progress', 'paused'].includes(mission.status);
     return mission.status === statusFilter;
   });
 
-  const handleEditMission = (mission) => {
-    setEditingMission(mission);
-    setEditFormData({
-      name: mission.name,
-      description: mission.description,
-      flight_altitude: mission.flight_altitude,
-      flight_speed: mission.flight_speed,
-      overlap_percentage: mission.overlap_percentage
-    });
-  };
-
-  const handleSaveEdit = async () => {
-    if (!editingMission) return;
-    
-    setLoading(true);
-    try {
-      await missionsAPI.updateMission(editingMission.id, editFormData);
-      toast.success('Mission updated successfully');
-      setEditingMission(null);
-      fetchActiveMissions();
-      if (selectedMission?.id === editingMission.id) {
-        fetchMissionDetails(editingMission.id);
-      }
-    } catch (error) {
-      toast.error('Failed to update mission');
-    } finally {
-      setLoading(false);
+  // Dynamic zoom calculation based on survey area size
+  const calculateOptimalZoom = (surveyArea) => {
+    if (!surveyArea || !surveyArea.coordinates || !surveyArea.coordinates[0]) {
+      return 15; // Default zoom
     }
-  };
 
-  const handleCancelEdit = () => {
-    setEditingMission(null);
-    setEditFormData({
-      name: '',
-      description: '',
-      flight_altitude: 50,
-      flight_speed: 5.0,
-      overlap_percentage: 70
-    });
+    try {
+      const coords = surveyArea.coordinates[0];
+      let lats, lngs;
+      
+      // Auto-detect coordinate format
+      const firstCoord = coords[0];
+      if (Math.abs(firstCoord[0]) <= 90 && Math.abs(firstCoord[1]) > 90) {
+        lats = coords.map(coord => coord[0]);
+        lngs = coords.map(coord => coord[1]);
+      } else {
+        lats = coords.map(coord => coord[1]);
+        lngs = coords.map(coord => coord[0]);
+      }
+      
+      const latRange = Math.max(...lats) - Math.min(...lats);
+      const lngRange = Math.max(...lngs) - Math.min(...lngs);
+      const maxRange = Math.max(latRange, lngRange);
+      
+      // Calculate zoom based on area size
+      if (maxRange > 0.1) return 10;      // Very large area
+      if (maxRange > 0.05) return 12;     // Large area
+      if (maxRange > 0.01) return 14;     // Medium area
+      if (maxRange > 0.005) return 16;    // Small area
+      return 18;                          // Very small area
+    } catch (error) {
+      console.error('Error calculating zoom:', error);
+      return 15;
+    }
   };
 
   return (
     <div className="mission-monitor">
       <div className="monitor-header">
         <h2>Mission Monitor</h2>
-        <p>Real-time monitoring and control of drone missions with survey area visualization</p>
+        <p>Real-time monitoring and control of drone missions with dynamic survey area visualization</p>
       </div>
 
       <div className="monitor-content">
@@ -387,18 +537,6 @@ const MissionMonitor = () => {
                       <span>ETA:</span>
                       <span>{calculateETA(mission)}</span>
                     </div>
-                    {mission.status === 'aborted' && (
-                      <div className="info-row">
-                        <span>Cancelled:</span>
-                        <span>{new Date(mission.completed_at).toLocaleDateString()}</span>
-                      </div>
-                    )}
-                    {mission.status === 'completed' && (
-                      <div className="info-row">
-                        <span>Completed:</span>
-                        <span>{new Date(mission.completed_at).toLocaleDateString()}</span>
-                      </div>
-                    )}
                   </div>
 
                   <div className="progress-bar">
@@ -440,9 +578,10 @@ const MissionMonitor = () => {
             <div className="mission-controls">
               <h3>Mission Controls</h3>
               
-              <div className="control-buttons">
-                {selectedMission.status === 'planned' && (
-                  <>
+              {/* Show controls only for active missions */}
+              {shouldShowDronePosition(selectedMission) && (
+                <div className="control-buttons">
+                  {selectedMission.status === 'planned' && (
                     <button
                       onClick={() => handleMissionControl('start', selectedMission.id)}
                       disabled={loading}
@@ -450,87 +589,78 @@ const MissionMonitor = () => {
                     >
                       <span>🚀</span> Start Mission
                     </button>
-                    <button
-                      onClick={() => handleEditMission(selectedMission)}
-                      disabled={loading}
-                      className="btn-secondary"
-                    >
-                      <span>✏️</span> Edit Mission
-                    </button>
-                  </>
-                )}
-                
-                {selectedMission.status === 'in_progress' && (
-                  <>
-                    <button
-                      onClick={() => handleMissionControl('pause', selectedMission.id)}
-                      disabled={loading}
-                      className="btn-warning"
-                    >
-                      <span>⏸️</span> Pause Mission
-                    </button>
-                    <button
-                      onClick={() => handleMissionControl('abort', selectedMission.id)}
-                      disabled={loading}
-                      className="btn-danger"
-                    >
-                      <span>❌</span> Cancel Mission
-                    </button>
-                  </>
-                )}
-                
-                {selectedMission.status === 'paused' && (
-                  <>
-                    <button
-                      onClick={() => handleMissionControl('resume', selectedMission.id)}
-                      disabled={loading}
-                      className="btn-success"
-                    >
-                      <span>▶️</span> Resume Mission
-                    </button>
-                    <button
-                      onClick={() => handleMissionControl('abort', selectedMission.id)}
-                      disabled={loading}
-                      className="btn-danger"
-                    >
-                      <span>❌</span> Cancel Mission
-                    </button>
-                  </>
-                )}
-                
-                {(selectedMission.status === 'aborted' || selectedMission.status === 'completed') && (
-                  <div className="mission-actions">
-                    <button
-                      onClick={() => console.log('Restart mission')}
-                      disabled={loading}
-                      className="btn-primary"
-                    >
-                      <span>🔄</span> Restart Mission
-                    </button>
-                    <button
-                      onClick={() => console.log('Clone mission')}
-                      disabled={loading}
-                      className="btn-secondary"
-                    >
-                      <span>📋</span> Clone Mission
-                    </button>
-                  </div>
-                )}
-              </div>
+                  )}
+                  
+                  {selectedMission.status === 'in_progress' && (
+                    <>
+                      <button
+                        onClick={() => handleMissionControl('pause', selectedMission.id)}
+                        disabled={loading}
+                        className="btn-warning"
+                      >
+                        <span>⏸️</span> Pause Mission
+                      </button>
+                      <button
+                        onClick={() => handleMissionControl('abort', selectedMission.id)}
+                        disabled={loading}
+                        className="btn-danger"
+                      >
+                        <span>❌</span> Cancel Mission
+                      </button>
+                    </>
+                  )}
+                  
+                  {selectedMission.status === 'paused' && (
+                    <>
+                      <button
+                        onClick={() => handleMissionControl('resume', selectedMission.id)}
+                        disabled={loading}
+                        className="btn-success"
+                      >
+                        <span>▶️</span> Resume Mission
+                      </button>
+                      <button
+                        onClick={() => handleMissionControl('abort', selectedMission.id)}
+                        disabled={loading}
+                        className="btn-danger"
+                      >
+                        <span>❌</span> Cancel Mission
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+              {/* // Add this button in your mission controls section */}
+{selectedMission.status === 'in_progress' && (
+  <div className="manual-controls">
+    <h4>Manual Controls</h4>
+    <button
+      onClick={() => updateMissionProgress(selectedMission.id, {
+        progress_percentage: Math.min(100, selectedMission.progress_percentage + 10),
+        distance_covered: selectedMission.distance_covered + 200
+      })}
+      className="btn-secondary"
+      disabled={loading}
+    >
+      <span>⚡</span> Advance Progress (+10%)
+    </button>
+  </div>
+)}
 
-              {selectedMission.status === 'in_progress' && (
-                <div className="manual-controls">
-                  <h4>Manual Controls</h4>
-                  <button
-                    onClick={() => updateMissionProgress(selectedMission.id, {
-                      progress_percentage: Math.min(100, selectedMission.progress_percentage + 10),
-                      distance_covered: selectedMission.distance_covered + 200
-                    })}
-                    className="btn-secondary"
-                    disabled={loading}
-                  >
-                    <span>⚡</span> Advance Progress (+10%)
-                  </button>
+              {/* Show reference message for inactive missions */}
+              {isInactiveMission(selectedMission) && (
+                <div className="mission-reference-info">
+                  <div className="reference-message">
+                    <span className="reference-icon">
+                      {selectedMission.status === 'completed' ? '✅' : '❌'}
+                    </span>
+                    <div className="reference-text">
+                      <strong>
+                        {selectedMission.status === 'completed' ? 'Mission Completed' : 'Mission Cancelled'}
+                      </strong>
+                      <p>Survey area shown for reference only. No active drone operations.</p>
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -556,28 +686,6 @@ const MissionMonitor = () => {
                       <value>{missionDetails.survey_area?.properties?.area_name || 'Defined'}</value>
                     </div>
                   </div>
-                  
-                  {/* Additional info for aborted/failed missions */}
-                  {['aborted', 'failed'].includes(selectedMission.status) && (
-                    <div className="mission-status-info">
-                      <div className="status-message">
-                        <span className="status-icon">
-                          {selectedMission.status === 'aborted' ? '❌' : '⚠️'}
-                        </span>
-                        <div className="status-text">
-                          <strong>
-                            {selectedMission.status === 'aborted' ? 'Mission Cancelled' : 'Mission Failed'}
-                          </strong>
-                          <p>
-                            {selectedMission.status === 'aborted' 
-                              ? 'This mission was manually cancelled. Survey area is shown for reference.'
-                              : 'This mission encountered an error and was terminated.'
-                            }
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
             </div>
@@ -587,65 +695,80 @@ const MissionMonitor = () => {
         <div className="monitor-map">
           {missionDetails ? (
             <MapContainer
-              center={[12.9716, 77.5946]}
-              zoom={15}
+              center={getSurveyAreaCenter(missionDetails.survey_area)}
+              zoom={calculateOptimalZoom(missionDetails.survey_area)}
               style={{ height: '100%', width: '100%' }}
+              key={`${selectedMission.id}-${missionDetails.survey_area ? 'with-area' : 'no-area'}`}
             >
               <TileLayer
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
               />
               
-              {/* Survey Area as Polygon - Main Feature */}
-              {missionDetails.survey_area && 
-               missionDetails.survey_area.coordinates && 
-               missionDetails.survey_area.coordinates.length > 0 && (
-                <Polygon
-                  positions={missionDetails.survey_area.coordinates[0].map(coord => [coord[1], coord[0]])}
-                  pathOptions={{
-                    color: getPolygonColor(selectedMission.status),
-                    fillColor: getPolygonColor(selectedMission.status),
-                    fillOpacity: ['aborted', 'failed'].includes(selectedMission.status) ? 0.2 : 0.3,
-                    weight: 3,
-                    opacity: ['aborted', 'failed'].includes(selectedMission.status) ? 0.6 : 1,
-                    dashArray: ['aborted', 'failed'].includes(selectedMission.status) ? '10, 5' : undefined
-                  }}
-                >
-                  <Popup>
-                    <div className="survey-area-popup">
-                      <strong>{missionDetails.survey_area.properties?.area_name || 'Survey Area'}</strong><br/>
-                      <div className="popup-info">
-                        <div>Mission: <span className="popup-value">{missionDetails.name}</span></div>
-                        <div>Type: <span className="popup-value">{missionDetails.mission_type}</span></div>
-                        <div>Pattern: <span className="popup-value">{missionDetails.survey_area.properties?.pattern_type || 'Grid'}</span></div>
-                        <div>Status: <span className={`popup-status ${selectedMission.status}`}>
-                          {selectedMission.status === 'aborted' ? 'Cancelled' : selectedMission.status.replace('_', ' ')}
-                        </span></div>
-                        <div>Progress: <span className="popup-value">{selectedMission.progress_percentage.toFixed(1)}%</span></div>
-                      </div>
-                    </div>
-                  </Popup>
-                </Polygon>
-              )}
+              {/* Dynamic Survey Area Polygon - Always show for reference */}
+              {missionDetails.survey_area && (() => {
+                const polygonCoords = getSurveyAreaPolygon(missionDetails.survey_area);
+                
+                if (polygonCoords && polygonCoords.length > 0) {
+                  return (
+                    <Polygon
+                      positions={polygonCoords}
+                      pathOptions={getPolygonStyle(selectedMission.status)}
+                    >
+                      <Popup>
+                        <div className="survey-area-popup">
+                          <strong>{missionDetails.survey_area.properties?.area_name || 'Survey Area'}</strong><br/>
+                          <div className="popup-info">
+                            <div>Mission: <span className="popup-value">{missionDetails.name}</span></div>
+                            <div>Type: <span className="popup-value">{missionDetails.mission_type}</span></div>
+                            <div>Pattern: <span className="popup-value">{missionDetails.survey_area.properties?.pattern_type || 'Grid'}</span></div>
+                            <div>Status: <span className={`popup-status ${selectedMission.status}`}>
+                              {selectedMission.status === 'aborted' ? 'Cancelled' : selectedMission.status.replace('_', ' ')}
+                            </span></div>
+                            <div>Progress: <span className="popup-value">{selectedMission.progress_percentage.toFixed(1)}%</span></div>
+                            {isInactiveMission(selectedMission) && (
+                              <div><em>Reference only - Mission {selectedMission.status}</em></div>
+                            )}
+                          </div>
+                        </div>
+                      </Popup>
+                    </Polygon>
+                  );
+                }
+                return null;
+              })()}
               
-              {/* Current Drone Position for active missions */}
-              {realTimeData.currentPosition && selectedMission.status === 'in_progress' && (
-                <Marker
-                  position={realTimeData.currentPosition}
-                  icon={createDroneIcon()}
-                >
-                  <Popup>
-                    <div className="drone-popup">
-                      <strong>🚁 {selectedMission.name}</strong><br/>
-                      <div className="popup-info">
-                        <div>Battery: <span className="popup-value">{Math.round(realTimeData.battery)}%</span></div>
-                        <div>Action: <span className="popup-value">{realTimeData.currentAction}</span></div>
-                        <div>Satellites: <span className="popup-value">{realTimeData.satellites}</span></div>
-                        <div>Status: <span className="popup-status online">Flying</span></div>
+              {/* Dynamic Drone Position - Only for active missions */}
+              {realTimeData.currentPosition && shouldShowDronePosition(selectedMission) && (
+                <>
+                  <Marker
+                    position={realTimeData.currentPosition}
+                    icon={createDroneIcon()}
+                  >
+                    <Popup>
+                      <div className="drone-popup">
+                        <strong>🚁 {selectedMission.name}</strong><br/>
+                        <div className="popup-info">
+                          <div>Battery: <span className="popup-value">{Math.round(realTimeData.battery)}%</span></div>
+                          <div>Action: <span className="popup-value">{realTimeData.currentAction}</span></div>
+                          <div>Satellites: <span className="popup-value">{realTimeData.satellites}</span></div>
+                          <div>Status: <span className="popup-status online">Flying</span></div>
+                        </div>
                       </div>
-                    </div>
-                  </Popup>
-                </Marker>
+                    </Popup>
+                  </Marker>
+                  
+                  <Circle
+                    center={realTimeData.currentPosition}
+                    radius={25}
+                    pathOptions={{
+                      color: '#007bff',
+                      fillColor: '#007bff',
+                      fillOpacity: 0.1,
+                      weight: 1
+                    }}
+                  />
+                </>
               )}
             </MapContainer>
           ) : (
@@ -660,8 +783,8 @@ const MissionMonitor = () => {
         </div>
       </div>
 
-      {/* Enhanced Real-time telemetry panel */}
-      {selectedMission && (
+      {/* Enhanced Real-time telemetry panel - Only for active missions */}
+      {selectedMission && shouldShowDronePosition(selectedMission) && (
         <div className="telemetry-panel">
           <h3>Real-time Telemetry</h3>
           <div className="telemetry-grid">
@@ -697,125 +820,6 @@ const MissionMonitor = () => {
             <div className="telemetry-item">
               <label>Current Action</label>
               <span className="current-action">{realTimeData.currentAction}</span>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Edit Mission Modal */}
-      {editingMission && (
-        <div className="modal-overlay">
-          <div className="modal-container">
-            <div className="modal-header">
-              <h3>Edit Mission: {editingMission.name}</h3>
-              <button
-                onClick={handleCancelEdit}
-                className="close-button"
-                type="button"
-              >
-                ✕
-              </button>
-            </div>
-            
-            <div className="modal-content">
-              <form className="edit-mission-form">
-                <div className="form-row">
-                  <div className="form-group">
-                    <label htmlFor="edit-mission-name">Mission Name</label>
-                    <input
-                      id="edit-mission-name"
-                      type="text"
-                      value={editFormData.name}
-                      onChange={(e) => setEditFormData({...editFormData, name: e.target.value})}
-                      placeholder="Enter mission name"
-                      required
-                    />
-                  </div>
-                </div>
-                
-                <div className="form-row">
-                  <div className="form-group">
-                    <label htmlFor="edit-description">Description</label>
-                    <textarea
-                      id="edit-description"
-                      value={editFormData.description}
-                      onChange={(e) => setEditFormData({...editFormData, description: e.target.value})}
-                      placeholder="Mission description"
-                      rows="3"
-                    />
-                  </div>
-                </div>
-                
-                <div className="form-row">
-                  <div className="form-group">
-                    <label htmlFor="edit-altitude">Flight Altitude (m)</label>
-                    <input
-                      id="edit-altitude"
-                      type="number"
-                      value={editFormData.flight_altitude}
-                      onChange={(e) => setEditFormData({...editFormData, flight_altitude: parseFloat(e.target.value)})}
-                      min="10"
-                      max="120"
-                    />
-                  </div>
-                  
-                  <div className="form-group">
-                    <label htmlFor="edit-speed">Flight Speed (m/s)</label>
-                    <input
-                      id="edit-speed"
-                      type="number"
-                      step="0.1"
-                      value={editFormData.flight_speed}
-                      onChange={(e) => setEditFormData({...editFormData, flight_speed: parseFloat(e.target.value)})}
-                      min="1"
-                      max="15"
-                    />
-                  </div>
-                </div>
-                
-                <div className="form-row">
-                  <div className="form-group">
-                    <label htmlFor="edit-overlap">Overlap Percentage (%)</label>
-                    <input
-                      id="edit-overlap"
-                      type="number"
-                      value={editFormData.overlap_percentage}
-                      onChange={(e) => setEditFormData({...editFormData, overlap_percentage: parseInt(e.target.value)})}
-                      min="50"
-                      max="90"
-                    />
-                  </div>
-                </div>
-              </form>
-              
-              <div className="modal-actions">
-                <button
-                  type="button"
-                  onClick={handleCancelEdit}
-                  className="btn-secondary"
-                  disabled={loading}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSaveEdit}
-                  className="btn-primary"
-                  disabled={loading}
-                >
-                  {loading ? (
-                    <>
-                      <span className="loading-spinner"></span>
-                      Saving...
-                    </>
-                  ) : (
-                    <>
-                      <span>💾</span>
-                      Save Changes
-                    </>
-                  )}
-                </button>
-              </div>
             </div>
           </div>
         </div>
