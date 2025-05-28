@@ -45,6 +45,9 @@ def login():
 @auth_bp.route('/profile', methods=['GET'], strict_slashes=False)
 @jwt_required()
 def get_profile():
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-    return jsonify(user.to_dict()), 200
+    try:
+        user_id = get_jwt_identity()
+        user = User.query.get(user_id)
+        return jsonify(user.to_dict()), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
