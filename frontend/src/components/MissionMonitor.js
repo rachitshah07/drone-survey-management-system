@@ -81,37 +81,56 @@ const MissionMonitor = () => {
     return mission && ['completed', 'aborted', 'failed'].includes(mission.status);
   };
 
-  // Dynamic helper function to detect coordinate format and get center
+  // Enhanced survey area center calculation with better error handling
   const getSurveyAreaCenter = (surveyArea) => {
-    if (!surveyArea || !surveyArea.coordinates || !surveyArea.coordinates[0]) {
-      return [12.9716, 77.5946]; // Default fallback
+    console.log('Getting survey area center for:', surveyArea);
+    
+    if (!surveyArea || !surveyArea.coordinates || !surveyArea.coordinates[0] || !Array.isArray(surveyArea.coordinates[0])) {
+      console.log('No valid survey area found, using default center');
+      return [12.9716, 77.5946]; // Default Bangalore coordinates
     }
 
     try {
       const coords = surveyArea.coordinates[0];
+      console.log('Processing coordinates:', coords);
       
+      if (!coords || coords.length === 0) {
+        console.log('Empty coordinates array');
+        return [12.9716, 77.5946];
+      }
+
       // Auto-detect coordinate format by checking value ranges
       let lats, lngs;
       
       // Check if first coordinate looks like latitude (typically -90 to 90)
       const firstCoord = coords[0];
+      if (!Array.isArray(firstCoord) || firstCoord.length < 2) {
+        console.log('Invalid coordinate format');
+        return [12.9716, 77.5946];
+      }
+
+      // Detect coordinate format
       if (Math.abs(firstCoord[0]) <= 90 && Math.abs(firstCoord[1]) > 90) {
         // Format: [lat, lng]
         lats = coords.map(coord => coord[0]);
         lngs = coords.map(coord => coord[1]);
+        console.log('Detected [lat, lng] format');
       } else if (Math.abs(firstCoord[1]) <= 90 && Math.abs(firstCoord[0]) > 90) {
         // Format: [lng, lat] (GeoJSON standard)
         lats = coords.map(coord => coord[1]);
         lngs = coords.map(coord => coord[0]);
+        console.log('Detected [lng, lat] format');
       } else {
         // Fallback: assume [lat, lng] if both are in valid ranges
         lats = coords.map(coord => coord[0]);
         lngs = coords.map(coord => coord[1]);
+        console.log('Using fallback [lat, lng] format');
       }
       
       const centerLat = (Math.min(...lats) + Math.max(...lats)) / 2;
       const centerLng = (Math.min(...lngs) + Math.max(...lngs)) / 2;
       
+      console.log('Calculated center:', [centerLat, centerLng]);
       return [centerLat, centerLng];
     } catch (error) {
       console.error('Error calculating survey area center:', error);
@@ -119,9 +138,12 @@ const MissionMonitor = () => {
     }
   };
 
-  // Dynamic survey area polygon conversion
+  // Enhanced survey area polygon conversion with better error handling
   const getSurveyAreaPolygon = (surveyArea) => {
+    console.log('Converting survey area to polygon:', surveyArea);
+    
     if (!surveyArea || !surveyArea.coordinates || !Array.isArray(surveyArea.coordinates)) {
+      console.log('No valid survey area coordinates found');
       return null;
     }
 
@@ -135,6 +157,11 @@ const MissionMonitor = () => {
         coordinates = surveyArea.coordinates[0];
       } else {
         coordinates = surveyArea.coordinates;
+      }
+
+      if (!coordinates || coordinates.length === 0) {
+        console.log('Empty coordinates after processing');
+        return null;
       }
 
       // Auto-detect coordinate format and convert to [lat, lng] for Leaflet
@@ -155,6 +182,7 @@ const MissionMonitor = () => {
         return coord;
       });
 
+      console.log('Converted coordinates for Leaflet:', leafletCoords);
       return leafletCoords;
     } catch (error) {
       console.error('Error converting survey area:', error);
@@ -256,6 +284,9 @@ const MissionMonitor = () => {
       const response = await missionsAPI.getMission(missionId);
       const mission = response.data;
       
+      console.log('Mission details fetched:', mission);
+      console.log('Survey area details:', mission.survey_area);
+      
       setMissionDetails(mission);
     } catch (error) {
       console.error('Failed to fetch mission details:', error);
@@ -289,6 +320,7 @@ const MissionMonitor = () => {
   }, [selectedMission, fetchActiveMissions, simulateRealTimeData]);
 
   const handleMissionSelect = useCallback((mission) => {
+    console.log('Mission selected:', mission);
     setSelectedMission(mission);
     fetchMissionDetails(mission.id);
     
@@ -377,7 +409,7 @@ const MissionMonitor = () => {
     return colors[status] || '#667eea';
   };
 
-  // Get polygon style based on mission status
+  // Get polygon style based on mission status with enhanced visibility for cancelled missions
   const getPolygonStyle = (status) => {
     const baseStyle = {
       color: getPolygonColor(status),
@@ -386,11 +418,11 @@ const MissionMonitor = () => {
     };
 
     if (['completed', 'aborted', 'failed'].includes(status)) {
-      // Inactive missions: reference style
+      // Inactive missions: reference style with better visibility
       return {
         ...baseStyle,
-        fillOpacity: 0.15,
-        opacity: 0.7,
+        fillOpacity: status === 'aborted' ? 0.25 : 0.2, // Higher opacity for cancelled missions
+        opacity: 0.8, // Higher border opacity for better visibility
         dashArray: status === 'completed' ? '5, 10, 5' : '10, 5', // Different dash patterns
       };
     } else {
@@ -443,7 +475,7 @@ const MissionMonitor = () => {
     return mission.status === statusFilter;
   });
 
-  // Dynamic zoom calculation based on survey area size
+  // Enhanced zoom calculation with better handling for small areas
   const calculateOptimalZoom = (surveyArea) => {
     if (!surveyArea || !surveyArea.coordinates || !surveyArea.coordinates[0]) {
       return 15; // Default zoom
@@ -467,12 +499,13 @@ const MissionMonitor = () => {
       const lngRange = Math.max(...lngs) - Math.min(...lngs);
       const maxRange = Math.max(latRange, lngRange);
       
-      // Calculate zoom based on area size
+      // Calculate zoom based on area size with better granularity
       if (maxRange > 0.1) return 10;      // Very large area
       if (maxRange > 0.05) return 12;     // Large area
       if (maxRange > 0.01) return 14;     // Medium area
       if (maxRange > 0.005) return 16;    // Small area
-      return 18;                          // Very small area
+      if (maxRange > 0.001) return 17;    // Very small area
+      return 18;                          // Tiny area
     } catch (error) {
       console.error('Error calculating zoom:', error);
       return 15;
@@ -578,19 +611,22 @@ const MissionMonitor = () => {
             <div className="mission-controls">
               <h3>Mission Controls</h3>
               
+              {/* Show Start button for planned missions */}
+              {selectedMission.status === 'planned' && (
+                <div className="control-buttons">
+                  <button
+                    onClick={() => handleMissionControl('start', selectedMission.id)}
+                    disabled={loading}
+                    className="btn-success"
+                  >
+                    <span>🚀</span> Start Mission
+                  </button>
+                </div>
+              )}
+              
               {/* Show controls only for active missions */}
               {shouldShowDronePosition(selectedMission) && (
                 <div className="control-buttons">
-                  {selectedMission.status === 'planned' && (
-                    <button
-                      onClick={() => handleMissionControl('start', selectedMission.id)}
-                      disabled={loading}
-                      className="btn-success"
-                    >
-                      <span>🚀</span> Start Mission
-                    </button>
-                  )}
-                  
                   {selectedMission.status === 'in_progress' && (
                     <>
                       <button
@@ -628,24 +664,25 @@ const MissionMonitor = () => {
                       </button>
                     </>
                   )}
+                  
+                  {/* Manual progress control for in-progress missions */}
+                  {selectedMission.status === 'in_progress' && (
+                    <div className="manual-controls">
+                      <h4>Manual Controls</h4>
+                      <button
+                        onClick={() => updateMissionProgress(selectedMission.id, {
+                          progress_percentage: Math.min(100, selectedMission.progress_percentage + 10),
+                          distance_covered: selectedMission.distance_covered + 200
+                        })}
+                        className="btn-secondary"
+                        disabled={loading}
+                      >
+                        <span>⚡</span> Advance Progress (+10%)
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
-              {/* // Add this button in your mission controls section */}
-{selectedMission.status === 'in_progress' && (
-  <div className="manual-controls">
-    <h4>Manual Controls</h4>
-    <button
-      onClick={() => updateMissionProgress(selectedMission.id, {
-        progress_percentage: Math.min(100, selectedMission.progress_percentage + 10),
-        distance_covered: selectedMission.distance_covered + 200
-      })}
-      className="btn-secondary"
-      disabled={loading}
-    >
-      <span>⚡</span> Advance Progress (+10%)
-    </button>
-  </div>
-)}
 
               {/* Show reference message for inactive missions */}
               {isInactiveMission(selectedMission) && (
@@ -693,12 +730,12 @@ const MissionMonitor = () => {
         </div>
 
         <div className="monitor-map">
-          {missionDetails ? (
+          {missionDetails && missionDetails.survey_area ? (
             <MapContainer
               center={getSurveyAreaCenter(missionDetails.survey_area)}
               zoom={calculateOptimalZoom(missionDetails.survey_area)}
               style={{ height: '100%', width: '100%' }}
-              key={`${selectedMission.id}-${missionDetails.survey_area ? 'with-area' : 'no-area'}`}
+              key={`${selectedMission.id}-${missionDetails.survey_area ? JSON.stringify(missionDetails.survey_area.coordinates) : 'no-area'}`}
             >
               <TileLayer
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -706,8 +743,9 @@ const MissionMonitor = () => {
               />
               
               {/* Dynamic Survey Area Polygon - Always show for reference */}
-              {missionDetails.survey_area && (() => {
+              {(() => {
                 const polygonCoords = getSurveyAreaPolygon(missionDetails.survey_area);
+                console.log('Rendering polygon for mission:', selectedMission.name, 'with coords:', polygonCoords);
                 
                 if (polygonCoords && polygonCoords.length > 0) {
                   return (
@@ -734,8 +772,10 @@ const MissionMonitor = () => {
                       </Popup>
                     </Polygon>
                   );
+                } else {
+                  console.log('No valid polygon coordinates found for rendering');
+                  return null;
                 }
-                return null;
               })()}
               
               {/* Dynamic Drone Position - Only for active missions */}
@@ -777,6 +817,9 @@ const MissionMonitor = () => {
                 <span className="placeholder-icon">🗺️</span>
                 <h3>Select a mission to view survey area</h3>
                 <p>Choose a mission from the list to see the survey area polygon and mission details</p>
+                {selectedMission && !missionDetails?.survey_area && (
+                  <p><em>No survey area data available for this mission</em></p>
+                )}
               </div>
             </div>
           )}
