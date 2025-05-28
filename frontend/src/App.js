@@ -1,6 +1,6 @@
 // App.js
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import './App.css';
@@ -10,20 +10,9 @@ import Dashboard from './components/Dashboard';
 import FleetManager from './components/FleetManager';
 import MissionPlanner from './components/MissionPlanner';
 import MissionMonitor from './components/MissionMonitor';
+import UserProfile from './components/UserProfile'; // Add this import
 import Navbar from './components/Navbar';
 import ProtectedRoute from './components/ProtectedRoute';
-
-// Component wrapper to reset state on route change
-const ComponentWrapper = ({ children }) => {
-  const location = useLocation();
-  
-  // Force re-render when route changes by using location.pathname as key
-  return (
-    <div key={location.pathname}>
-      {children}
-    </div>
-  );
-};
 
 function App() {
   const [user, setUser] = useState(null);
@@ -73,9 +62,7 @@ function App() {
             path="/dashboard" 
             element={
               <ProtectedRoute>
-                <ComponentWrapper>
-                  <Dashboard />
-                </ComponentWrapper>
+                <Dashboard />
               </ProtectedRoute>
             } 
           />
@@ -84,9 +71,7 @@ function App() {
             path="/fleet" 
             element={
               <ProtectedRoute>
-                <ComponentWrapper>
-                  <FleetManager />
-                </ComponentWrapper>
+                <FleetManager />
               </ProtectedRoute>
             } 
           />
@@ -95,9 +80,7 @@ function App() {
             path="/missions/plan" 
             element={
               <ProtectedRoute>
-                <ComponentWrapper>
-                  <MissionPlanner />
-                </ComponentWrapper>
+                <MissionPlanner />
               </ProtectedRoute>
             } 
           />
@@ -106,9 +89,17 @@ function App() {
             path="/missions/monitor" 
             element={
               <ProtectedRoute>
-                <ComponentWrapper>
-                  <MissionMonitor />
-                </ComponentWrapper>
+                <MissionMonitor />
+              </ProtectedRoute>
+            } 
+          />
+          
+          {/* Add Profile Route */}
+          <Route 
+            path="/profile" 
+            element={
+              <ProtectedRoute>
+                <UserProfile />
               </ProtectedRoute>
             } 
           />
